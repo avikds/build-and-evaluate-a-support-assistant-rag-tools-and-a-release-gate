@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import re
+
 import numpy as np
 
 DOCS = [
@@ -104,231 +105,185 @@ def embed(text, dim=64):
     """A deterministic stand-in for an embedding model: hashed words and word pairs, unit length."""
     toks = [t for t in tokenize(text) if t not in STOP]
     v = np.zeros(dim)
-
     for f in toks + [a + "_" + b for a, b in zip(toks, toks[1:])]:
         h = hashlib.sha256(f.encode()).digest()
         v[h[0] % dim] += 1.0 if h[1] % 2 == 0 else -1.0
-
     n = np.linalg.norm(v)
     return v / n if n > 0 else v
 
 
 def _sentences(text):
-    """Split text into sentences using punctuation followed by whitespace."""
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
 
 
 def _blocks(prompt):
     blocks, cur = [], None
-
     for line in prompt.split("\n"):
         m = re.match(r"^\[(\S+)\] \((trusted|untrusted)\) (.*)$", line)
-
         if m:
             cur = {"id": m.group(1), "trusted": m.group(2) == "trusted", "lines": []}
             blocks.append(cur)
-
         elif line.startswith(("QUESTION:", "TOOLS:", "TOOL RESULT:", "ERRORS:", "SYSTEM:")) or line == "CONTEXT:":
             cur = None
-
         elif cur is not None:
             cur["lines"].append(line)
-
     return blocks
 
 
 def scripted_llm(model, prompt):
     """A stand-in for a chat model. model is "small" or "large". Returns the raw text it would send back."""
-
     field = lambda name: next((l[len(name):].strip() for l in prompt.split("\n") if l.startswith(name)), None)
     question, tools, result = field("QUESTION:") or "", field("TOOLS:"), field("TOOL RESULT:")
-
     blocks = _blocks(prompt)
     visible = blocks[:2] if model == "small" else blocks
-
     obj = None
-
     if result is not None and "was not run" not in result:
         obj = {"answer": result, "citations": [], "confidence": 0.95}
-
     elif tools and result is None:
         order = re.search(r"\b(\d{5})\b", question)
-
         if order and "lookup_order" in tools:
             obj = {"answer": "", "citations": [], "confidence": 0.9,
                    "tool_call": {"name": "lookup_order", "args": {"order_id": order.group(1)}}}
-
         for b in visible:
             text = " ".join(b["lines"])
             m = re.search(r"call (\w+) with to=(\S+)", text)
-
             if obj is None and m and m.group(1) in tools and "refund" in question.lower():
                 obj = {"answer": "", "citations": [], "confidence": 0.9,
                        "tool_call": {"name": m.group(1), "args": {"to": m.group(2), "body": "full order history"}}}
-
     if obj is None:
         q = [t for t in tokenize(question) if t not in STOP]
-
         best, best_score, best_id, best_trusted = "I could not find that in the help center.", 0, None, False
-
         for b in visible:
             for s in _sentences(" ".join(b["lines"])):
                 if "AI assistant" in s:
                     continue
-
                 score = len(set(q) & set(tokenize(s)))
-
                 better = score > best_score or (score == best_score and score > 0 and b["trusted"] and not best_trusted)
-
                 if better:
                     best, best_score, best_id, best_trusted = s, score, b["id"], b["trusted"]
-
         conf = best_score / max(len(set(q)), 1)
-
         obj = {"answer": best, "citations": [best_id] if best_id else [],
                "confidence": round(conf * (0.9 if model == "small" else 1.0), 2)}
-
     raw = json.dumps(obj)
-
     if model == "small":
         if "ERRORS:" not in prompt and int(hashlib.sha256(prompt.encode()).hexdigest()[:2], 16) % 4 == 0:
             raw = raw[:-1] + ",}"
-
         raw = "Here is the answer.\n```json\n" + raw + "\n```"
-
     return raw
 
-
-# ---- Step 1: Heading-aware document chunking
 
 def chunk_document(doc, max_tokens=40):
     """
     Split one help page into retrieval chunks.
 
     Each chunk:
-    - Retains its document title and section heading.
-    - Contains text from only one section.
-    - Respects the maximum whitespace-separated token count.
-    - Preserves the document's trust status.
+    - Belongs to exactly one section.
+    - Preserves the document title and section name in its path.
+    - Contains no more than max_tokens whitespace-separated words.
+    - Receives a sequential ID across the entire document.
     """
 
-    if max_tokens <= 0:
-        raise ValueError("max_tokens must be greater than zero.")
+    lines = doc["text"].strip().splitlines()
 
-    lines = doc["text"].splitlines()
+    # The first line contains the document title, for example: "# Shipping".
+    title_heading = lines[0].strip()
+    title = title_heading[1:].strip() if title_heading.startswith("#") else title_heading
 
-    # Extract the page title from its first line.
-    title = ""
-
-    if lines:
-        title_match = re.match(r"^#\s+(.+?)\s*$", lines[0].strip())
-
-        if title_match:
-            title = title_match.group(1).strip()
-
-    sections = []
+    chunks = []
     current_section = None
     section_lines = []
 
-    def save_section():
-        """Save a section and its associated body text."""
-        if current_section is not None:
-            body = " ".join(
-                line.strip() for line in section_lines if line.strip()
-            )
-            sections.append((current_section, body))
+    def process_section(section_name, text_lines):
+        """Split and pack the content of one section into token-limited chunks."""
 
-    # Identify individual sections using their second-level headings.
-    for line in lines[1:]:
-        stripped_line = line.strip()
+        if section_name is None:
+            return
 
-        heading_match = re.match(r"^##\s+(.+?)\s*$", stripped_line)
-
-        if heading_match:
-            # Finish the previous section before starting another.
-            save_section()
-
-            current_section = heading_match.group(1).strip()
-            section_lines = []
-
-        elif current_section is not None:
-            section_lines.append(stripped_line)
-
-    # Save the last section.
-    save_section()
-
-    chunks = []
-    chunk_index = 0
-
-    # Process each section independently so chunks never cross section boundaries.
-    for section_name, section_text in sections:
+        # Combine all text lines belonging to the current section.
+        section_text = " ".join(
+            line.strip() for line in text_lines if line.strip()
+        )
 
         if not section_text:
-            continue
+            return
 
-        # Split the section into sentences using the provided helper.
-        sentences = _sentences(section_text)
+        # Step 1: Split the section text into sentences.
+        sentence_pieces = []
 
-        pieces = []
-
-        for sentence in sentences:
+        for sentence in _sentences(section_text):
             words = sentence.split()
 
-            # Split an oversized sentence into pieces of at most max_tokens words.
-            for start in range(0, len(words), max_tokens):
-                piece = " ".join(words[start:start + max_tokens])
+            # Split long sentences into pieces of at most max_tokens words.
+            if len(words) > max_tokens:
+                for start in range(0, len(words), max_tokens):
+                    piece = " ".join(words[start:start + max_tokens])
+                    sentence_pieces.append(piece)
+            else:
+                sentence_pieces.append(sentence)
 
-                if piece:
-                    pieces.append(piece)
-
-        # Retain the full heading path for retrieval and citation.
-        path = f"{title} > {section_name}" if title else section_name
-
+        # Step 2: Pack the pieces into chunks without exceeding max_tokens.
         current_pieces = []
         current_token_count = 0
 
-        # Pack sentence pieces in their original order.
-        for piece in pieces:
+        for piece in sentence_pieces:
             piece_token_count = count_tokens(piece)
 
-            # Start a new chunk if adding this piece exceeds the token limit.
-            if (
-                current_pieces
-                and current_token_count + piece_token_count > max_tokens
-            ):
-                chunk_text = " ".join(current_pieces)
+            # Add the piece if it fits within the current chunk.
+            if current_token_count + piece_token_count <= max_tokens:
+                current_pieces.append(piece)
+                current_token_count += piece_token_count
 
-                chunks.append({
-                    "id": f"{doc['id']}#{chunk_index}",
-                    "doc_id": doc["id"],
-                    "path": path,
-                    "text": chunk_text,
-                    "tokens": count_tokens(chunk_text),
-                    "trusted": doc["trusted"],
-                })
+            else:
+                # Save the previous chunk before starting a new one.
+                if current_pieces:
+                    chunk_text = " ".join(current_pieces)
 
-                chunk_index += 1
-                current_pieces = []
-                current_token_count = 0
+                    chunks.append({
+                        "id": f"{doc['id']}#{len(chunks)}",
+                        "doc_id": doc["id"],
+                        "path": f"{title} > {section_name}",
+                        "text": chunk_text,
+                        "tokens": count_tokens(chunk_text),
+                        "trusted": doc["trusted"]
+                    })
 
-            current_pieces.append(piece)
-            current_token_count += piece_token_count
+                # Start the next chunk with the piece that did not fit.
+                current_pieces = [piece]
+                current_token_count = piece_token_count
 
-        # Save the remaining pieces belonging to the current section.
+        # Save any remaining pieces after processing the section.
         if current_pieces:
             chunk_text = " ".join(current_pieces)
 
             chunks.append({
-                "id": f"{doc['id']}#{chunk_index}",
+                "id": f"{doc['id']}#{len(chunks)}",
                 "doc_id": doc["id"],
-                "path": path,
+                "path": f"{title} > {section_name}",
                 "text": chunk_text,
                 "tokens": count_tokens(chunk_text),
-                "trusted": doc["trusted"],
+                "trusted": doc["trusted"]
             })
 
-            chunk_index += 1
+    # Step 3: Read each line and identify section boundaries.
+    for line in lines[1:]:
+        stripped_line = line.strip()
 
+        if stripped_line.startswith("## "):
+            # Finish the previous section before starting the next one.
+            process_section(current_section, section_lines)
+
+            # Extract the new section heading.
+            current_section = stripped_line[3:].strip()
+            section_lines = []
+
+        elif current_section is not None:
+            # Collect all text lines belonging to the current section.
+            section_lines.append(stripped_line)
+
+    # Process the final section after reaching the end of the document.
+    process_section(current_section, section_lines)
+
+    # Return all chunks in their original document order.
     return chunks
 
 # Step 2 - bm25_scores (not yet solved)
