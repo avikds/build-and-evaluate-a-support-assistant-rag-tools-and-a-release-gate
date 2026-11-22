@@ -286,8 +286,86 @@ def chunk_document(doc, max_tokens=40):
     # Return all chunks in their original document order.
     return chunks
 
-# Step 2 - bm25_scores (not yet solved)
-# TODO: implement
+# Step 2 - bm25_scores
+def bm25_scores(chunks, query, k1=1.5, b=0.75):
+    """One BM25 score per chunk for the query."""
+
+    # Return an empty list when there are no chunks.
+    if not chunks:
+        return []
+
+    # Tokenize each document using its heading path and text.
+    documents = [
+        tokenize(chunk["path"] + " " + chunk["text"])
+        for chunk in chunks
+    ]
+
+    N = len(documents)
+
+    # Calculate individual document lengths and average length.
+    lengths = [len(doc) for doc in documents]
+    avg_length = sum(lengths) / N
+
+    # Tokenize the query and remove stop words.
+    # Preserve repeated terms because each occurrence contributes
+    # separately to the final BM25 score.
+    query_terms = [
+        term for term in tokenize(query)
+        if term not in STOP
+    ]
+
+    # If the query contains only stop words, return zero scores.
+    if not query_terms:
+        return [0.0] * N
+
+    # Avoid division by zero when all documents are empty.
+    if avg_length == 0:
+        return [0.0] * N
+
+    # Calculate document frequency (df) for each distinct term.
+    df = {}
+
+    for doc in documents:
+        for term in set(doc):
+            df[term] = df.get(term, 0) + 1
+
+    scores = []
+
+    # Calculate the BM25 score for every document.
+    for doc, length in zip(documents, lengths):
+        score = 0.0
+
+        # Repeated query terms are intentionally processed repeatedly.
+        for term in query_terms:
+            # Frequency of the query term in this document.
+            tf = doc.count(term)
+
+            if tf == 0:
+                continue
+
+            # Number of documents containing this term.
+            doc_freq = df[term]
+
+            # Inverse Document Frequency (IDF).
+            idf = math.log(
+                1 + (N - doc_freq + 0.5) / (doc_freq + 0.5)
+            )
+
+            # BM25 term-frequency normalization.
+            tf_weight = (
+                tf * (k1 + 1)
+                / (
+                    tf + k1 * (
+                        1 - b + b * length / avg_length
+                    )
+                )
+            )
+
+            score += idf * tf_weight
+
+        scores.append(float(score))
+
+    return scores
 
 # Step 3 - hybrid_search (not yet solved)
 # TODO: implement
