@@ -568,8 +568,66 @@ def parse_answer(raw, known_ids):
 
     return obj, []
 
-# Step 6 - ask (not yet solved)
-# TODO: implement
+# Step 6 - ask
+def ask(model, prompt, known_ids, max_attempts=2):
+    """Call the model, validate, and retry with the errors fed back, up to max_attempts."""
+
+    # Retrieve the model's input and output prices per million tokens.
+    in_price, out_price = PRICES[model]
+
+    # Initialize the result and tracking variables.
+    result = None
+    attempts = 0
+    all_errors = []
+    total_cost = 0.0
+
+    # Start with the original prompt.
+    current_prompt = prompt
+
+    # Call the model up to the maximum number of attempts.
+    for _ in range(max_attempts):
+
+        # Generate the model's raw response.
+        raw = scripted_llm(model, current_prompt)
+
+        # Record the actual number of model calls.
+        attempts += 1
+
+        # Calculate the cost of this model call.
+        input_tokens = count_tokens(current_prompt)
+        output_tokens = count_tokens(raw)
+
+        total_cost += (
+            input_tokens * in_price + output_tokens * out_price
+        ) / 1e6
+
+        # Parse and validate the model's response.
+        obj, errors = parse_answer(raw, known_ids)
+
+        # Stop retrying when the response is valid.
+        if obj is not None:
+            result = obj
+            break
+
+        # Accumulate errors from this attempt in chronological order.
+        all_errors.extend(errors)
+
+        # Build the next prompt from the ORIGINAL prompt,
+        # including only the errors from the current failed attempt.
+        current_prompt = (
+            prompt
+            + "\nERRORS: "
+            + "; ".join(errors)
+            + "\nReply with valid JSON only."
+        )
+
+    # Return the complete execution result.
+    return {
+        "result": result,
+        "attempts": attempts,
+        "errors": all_errors,
+        "cost": total_cost
+    }
 
 # Step 7 - cascade (not yet solved)
 # TODO: implement
