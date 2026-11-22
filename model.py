@@ -853,8 +853,83 @@ def run_turn(question, chunks, vectors, version, k=3, threshold=0.6, gate=True):
         "citations": citations
     }
 
-# Step 10 - SemanticCache (not yet solved)
-# TODO: implement
+# Step 10 - SemanticCache
+class SemanticCache:
+    """Reuse answers for questions with near-identical embeddings, per version, dropped when a source page changes."""
+
+    def __init__(self, threshold=0.92):
+        # Minimum cosine similarity required for a cache hit.
+        self.threshold = threshold
+
+        # Store cache entries in insertion order.
+        self.entries = []
+
+    def get(self, vector, version):
+        """Return the best matching cached value for the given version."""
+
+        # Convert the query embedding into a NumPy array.
+        query_vector = np.asarray(vector, dtype=float)
+
+        best_entry = None
+        best_similarity = float("-inf")
+
+        # Search only entries belonging to the requested version.
+        for entry in self.entries:
+            if entry["version"] != version:
+                continue
+
+            # Both embeddings are unit length, so their dot product
+            # represents cosine similarity.
+            similarity = float(
+                np.dot(query_vector, entry["vector"])
+            )
+
+            # Update only for a strictly higher score.
+            # This preserves the earliest entry when scores are tied.
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_entry = entry
+
+        # Return None when no matching entry meets the threshold.
+        if (
+            best_entry is None
+            or best_similarity < self.threshold
+        ):
+            return None
+
+        return best_entry["value"]
+
+    def put(self, vector, version, value, doc_ids):
+        """Store an answer together with its embedding, version and source IDs."""
+
+        # Store a copy of the embedding to prevent external modifications
+        # from changing the cached vector.
+        entry = {
+            "vector": np.asarray(vector, dtype=float).copy(),
+            "version": version,
+            "value": value,
+            "doc_ids": set(doc_ids)
+        }
+
+        self.entries.append(entry)
+
+    def invalidate(self, doc_id):
+        """Remove every cached entry that depends on the specified document."""
+
+        # Keep only entries that do not reference the changed document.
+        remaining_entries = [
+            entry
+            for entry in self.entries
+            if doc_id not in entry["doc_ids"]
+        ]
+
+        # Calculate how many entries were removed.
+        removed_count = len(self.entries) - len(remaining_entries)
+
+        # Update the cache.
+        self.entries = remaining_entries
+
+        return removed_count
 
 # Step 11 - evaluate (not yet solved)
 # TODO: implement
