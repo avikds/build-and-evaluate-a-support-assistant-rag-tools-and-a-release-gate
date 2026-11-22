@@ -367,8 +367,72 @@ def bm25_scores(chunks, query, k1=1.5, b=0.75):
 
     return scores
 
-# Step 3 - hybrid_search (not yet solved)
-# TODO: implement
+# Step 3 - hybrid_search
+def hybrid_search(chunks, vectors, query, k=3, rrf_k=60):
+    """The top k chunks by reciprocal rank fusion of embedding and BM25 rankings."""
+
+    # Return an empty list when there are no chunks or k is non-positive.
+    if not chunks or k <= 0:
+        return []
+
+    n = len(chunks)
+
+    # Step 1: Calculate dense similarity scores using embedding vectors.
+    # Both the query embedding and chunk vectors are unit length.
+    query_vector = embed(query)
+
+    dense_scores = [
+        float(np.dot(query_vector, vectors[i]))
+        for i in range(n)
+    ]
+
+    # Step 2: Calculate sparse keyword relevance scores using BM25.
+    sparse_scores = bm25_scores(chunks, query)
+
+    # Step 3: Rank documents separately for dense and sparse retrieval.
+    # Higher scores receive better ranks.
+    # Ties are resolved using the original chunk position.
+
+    dense_order = sorted(
+        range(n),
+        key=lambda i: (-dense_scores[i], i)
+    )
+
+    sparse_order = sorted(
+        range(n),
+        key=lambda i: (-sparse_scores[i], i)
+    )
+
+    # Store the 1-based rank of each chunk in both rankings.
+    dense_ranks = [0] * n
+    sparse_ranks = [0] * n
+
+    for rank, index in enumerate(dense_order, start=1):
+        dense_ranks[index] = rank
+
+    for rank, index in enumerate(sparse_order, start=1):
+        sparse_ranks[index] = rank
+
+    # Step 4: Calculate Reciprocal Rank Fusion scores.
+    fused_scores = []
+
+    for i in range(n):
+        score = (
+            1.0 / (rrf_k + dense_ranks[i])
+            + 1.0 / (rrf_k + sparse_ranks[i])
+        )
+
+        fused_scores.append(score)
+
+    # Step 5: Rank chunks by their fused scores.
+    # Resolve ties by preserving the original chunk order.
+    final_order = sorted(
+        range(n),
+        key=lambda i: (-fused_scores[i], i)
+    )
+
+    # Return the top k chunks, best ranked first.
+    return [chunks[i] for i in final_order[:k]]
 
 # Step 4 - build_prompt (not yet solved)
 # TODO: implement
