@@ -719,8 +719,139 @@ def permission_gate(call, chunks, role_tools):
     # Rule 3: Allow authorized calls without tainted arguments.
     return "allow", "ok"
 
-# Step 9 - run_turn (not yet solved)
-# TODO: implement
+# Step 9 - run_turn
+def run_turn(question, chunks, vectors, version, k=3, threshold=0.6, gate=True):
+    """Retrieve, prompt, answer with the cascade, gate and run a tool call, and answer again with its result."""
+
+    # Get the tools authorized for this assistant version.
+    tools = version.get("tools")
+
+    # Step 1: Retrieve the most relevant chunks using hybrid search.
+    hits = hybrid_search(chunks, vectors, question, k=k)
+
+    # Build the prompt using the retrieved context and available tools.
+    prompt = build_prompt(
+        question,
+        hits,
+        tools=tools
+    )
+
+    # Collect the IDs of retrieved chunks for citation validation.
+    known = [chunk["id"] for chunk in hits]
+
+    # Step 2: Generate the initial answer using the model cascade.
+    first = cascade(prompt, known, threshold)
+
+    # Initialize the final response and accumulated cost.
+    final = first
+    total_cost = first["cost"]
+
+    # Record all proposed tool actions.
+    actions = []
+
+    # Extract the validated model response.
+    obj = first["result"]
+
+    # Step 3: Check whether the model proposed a tool call.
+    if obj is not None and "tool_call" in obj:
+
+        call = obj["tool_call"]
+        name = call["name"]
+        args = call["args"]
+
+        # Always compute the permission decision, even when
+        # the permission gate is disabled.
+        gate_decision, _ = permission_gate(
+            call,
+            hits,
+            tools or []
+        )
+
+        # When the gate is disabled, allow the proposed call.
+        # Otherwise, enforce the permission gate's decision.
+        decision = gate_decision if gate else "allow"
+
+        # Execute the tool only when the effective decision is allow.
+        executed = decision == "allow"
+
+        # An unsafe execution occurs when a tool runs even though
+        # the permission gate would have required confirmation.
+        unsafe = executed and gate_decision == "confirm"
+
+        # Record the tool action.
+        actions.append({
+            "tool": name,
+            "decision": decision,
+            "executed": executed,
+            "unsafe": unsafe
+        })
+
+        # Step 4: Execute the permitted tool or record its denial.
+        if executed:
+
+            if name == "lookup_order":
+                # Look up the requested order using its order ID.
+                order_id = args.get("order_id")
+
+                note = ORDERS.get(
+                    order_id,
+                    "No order with that number."
+                )
+
+            else:
+                # Record successful execution of another tool.
+                note = f"{name} sent."
+
+        else:
+            # Do not execute blocked or confirmation-required tools.
+            note = (
+                f"{name} was not run (decision: {decision}). "
+                "Answer from the context."
+            )
+
+        # Step 5: Send the tool result back to the model.
+        # The original context and question are retained.
+        second_prompt = (
+            prompt + "\nTOOL RESULT: " + note
+        )
+
+        second = cascade(
+            second_prompt,
+            known,
+            threshold
+        )
+
+        # Replace the initial response with the post-tool response.
+        final = second
+
+        # Add the second cascade's cost to the initial cost.
+        total_cost += second["cost"]
+
+    # Extract the final validated answer, if one exists.
+    final_obj = final["result"]
+
+    answer = (
+        final_obj["answer"]
+        if final_obj is not None
+        else None
+    )
+
+    citations = (
+        final_obj["citations"]
+        if final_obj is not None
+        else []
+    )
+
+    # Step 6: Return the complete assistant turn.
+    return {
+        "question": question,
+        "retrieved": [chunk["path"] for chunk in hits],
+        "cost": total_cost,
+        "model": final["model"],
+        "actions": actions,
+        "answer": answer,
+        "citations": citations
+    }
 
 # Step 10 - SemanticCache (not yet solved)
 # TODO: implement
