@@ -931,8 +931,119 @@ class SemanticCache:
 
         return removed_count
 
-# Step 11 - evaluate (not yet solved)
-# TODO: implement
+# Step 11 - evaluate
+def evaluate(results, golden):
+    """Accuracy overall and per category, retrieval recall, cost per question, unsafe actions and per-case results."""
+
+    total_cases = len(golden)
+
+    # Initialize evaluation metrics.
+    passed_count = 0
+    total_cost = 0.0
+    unsafe_actions = 0
+
+    # Track individual case results.
+    cases = {}
+
+    # Track category-level accuracy.
+    category_totals = {}
+    category_passed = {}
+
+    # Track retrieval recall separately.
+    retrieval_hits = 0
+    retrieval_total = 0
+
+    # Evaluate each result against its corresponding golden case.
+    for i, case in enumerate(golden):
+        result = results[i]
+
+        # Treat a missing or None answer as an empty string.
+        answer = result.get("answer")
+        answer_text = "" if answer is None else str(answer)
+
+        # Check whether every required fact appears in the answer.
+        # Matching is case-insensitive.
+        answer_lower = answer_text.lower()
+
+        passed = all(
+            fact.lower() in answer_lower
+            for fact in case["facts"]
+        )
+
+        # Record the individual test result.
+        cases[case["id"]] = passed
+
+        if passed:
+            passed_count += 1
+
+        # Update category-level statistics.
+        category = case["category"]
+
+        category_totals[category] = (
+            category_totals.get(category, 0) + 1
+        )
+
+        if passed:
+            category_passed[category] = (
+                category_passed.get(category, 0) + 1
+            )
+
+        # Evaluate retrieval recall only when a gold path exists.
+        gold_path = case["gold"]
+
+        if gold_path is not None:
+            retrieval_total += 1
+
+            if gold_path in result.get("retrieved", []):
+                retrieval_hits += 1
+
+        # Accumulate the total execution cost.
+        total_cost += result.get("cost", 0.0)
+
+        # Count all actions explicitly marked as unsafe.
+        for action in result.get("actions", []):
+            if action.get("unsafe", False):
+                unsafe_actions += 1
+
+    # Calculate overall accuracy.
+    accuracy = (
+        round(passed_count / total_cases, 4)
+        if total_cases > 0
+        else None
+    )
+
+    # Calculate category accuracy with sorted category keys.
+    by_category = {
+        category: round(
+            category_passed.get(category, 0) / category_totals[category],
+            4
+        )
+        for category in sorted(category_totals)
+    }
+
+    # Calculate retrieval recall.
+    retrieval_recall = (
+        round(retrieval_hits / retrieval_total, 4)
+        if retrieval_total > 0
+        else None
+    )
+
+    # Calculate average cost per question.
+    cost_per_question = (
+        round(total_cost / total_cases, 6)
+        if total_cases > 0
+        else None
+    )
+
+    # Return the complete evaluation report.
+    return {
+        "accuracy": accuracy,
+        "by_category": by_category,
+        "retrieval_recall": retrieval_recall,
+        "cost_per_question": cost_per_question,
+        "unsafe_actions": unsafe_actions,
+        "cases": cases
+    }
 
 # Step 12 - release_gate (not yet solved)
 # TODO: implement
