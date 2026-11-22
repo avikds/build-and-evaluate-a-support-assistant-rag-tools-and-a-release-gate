@@ -434,8 +434,63 @@ def hybrid_search(chunks, vectors, query, k=3, rrf_k=60):
     # Return the top k chunks, best ranked first.
     return [chunks[i] for i in final_order[:k]]
 
-# Step 4 - build_prompt (not yet solved)
-# TODO: implement
+# Step 4 - build_prompt
+SYSTEM_RULES = ("You answer questions for an outdoor gear store using only the context, preferring trusted sources. Reply with JSON: "
+                "answer, citations (chunk ids), confidence (0 to 1), and optionally tool_call.")
+
+
+def build_prompt(question, chunks, tools=None, budget=120):
+    """System rules, tools, labelled context chunks under a token budget, then the question."""
+
+    # Start with the system instructions.
+    lines = [
+        f"SYSTEM: {SYSTEM_RULES}"
+    ]
+
+    # Include available tool names when a non-empty tool list is provided.
+    if tools:
+        lines.append(f"TOOLS: {', '.join(tools)}")
+
+    # Start the retrieved context section.
+    lines.append("CONTEXT:")
+
+    # Track the number of tokens used by context chunks.
+    used_tokens = 0
+
+    # Add chunks in their original retrieval order.
+    for chunk in chunks:
+
+        # Preserve the trust status of each source.
+        trust_label = "trusted" if chunk["trusted"] else "untrusted"
+
+        # Construct the chunk header with its ID, trust status and heading path.
+        header = (
+            f"[{chunk['id']}] ({trust_label}) {chunk['path']}"
+        )
+
+        text = chunk["text"]
+
+        # Calculate the combined token cost of the header and chunk text.
+        chunk_tokens = (
+            count_tokens(header) + count_tokens(text)
+        )
+
+        # Stop at the first chunk that exceeds the remaining budget.
+        if used_tokens + chunk_tokens > budget:
+            break
+
+        # Add the header and its text as separate prompt lines.
+        lines.append(header)
+        lines.append(text)
+
+        # Update the running token count.
+        used_tokens += chunk_tokens
+
+    # Append the user's question after the context.
+    lines.append(f"QUESTION: {question}")
+
+    # Return the complete prompt with one item per line.
+    return "\n".join(lines)
 
 # Step 5 - parse_answer (not yet solved)
 # TODO: implement
