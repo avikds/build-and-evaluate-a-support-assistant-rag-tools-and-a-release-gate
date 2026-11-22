@@ -629,8 +629,42 @@ def ask(model, prompt, known_ids, max_attempts=2):
         "cost": total_cost
     }
 
-# Step 7 - cascade (not yet solved)
-# TODO: implement
+# Step 7 - cascade
+def cascade(prompt, known_ids, threshold=0.6):
+    """Small model first; the large model when the small one fails or is below the confidence threshold."""
+
+    # First, attempt to answer using the less expensive small model.
+    first = ask("small", prompt, known_ids)
+
+    small_result = first["result"]
+
+    # Keep the small model's response if it is valid and either:
+    # 1. It proposes a tool call, or
+    # 2. Its confidence meets or exceeds the threshold.
+    if (
+        small_result is not None
+        and (
+            "tool_call" in small_result
+            or small_result["confidence"] >= threshold
+        )
+    ):
+        result = first.copy()
+        result["model"] = "small"
+        result["escalated"] = False
+
+        return result
+
+    # Otherwise, escalate the question to the more capable large model.
+    second = ask("large", prompt, known_ids)
+
+    result = second.copy()
+    result["model"] = "large"
+    result["escalated"] = True
+
+    # Include the costs of both model calls.
+    result["cost"] = first["cost"] + second["cost"]
+
+    return result
 
 # Step 8 - permission_gate (not yet solved)
 # TODO: implement
