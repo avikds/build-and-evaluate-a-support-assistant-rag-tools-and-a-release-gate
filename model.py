@@ -666,8 +666,58 @@ def cascade(prompt, known_ids, threshold=0.6):
 
     return result
 
-# Step 8 - permission_gate (not yet solved)
-# TODO: implement
+# Step 8 - permission_gate
+def permission_gate(call, chunks, role_tools):
+    """('allow' | 'confirm' | 'deny', reason) for a proposed tool call."""
+
+    # Extract the proposed tool name and its arguments.
+    name = call["name"]
+    args = call.get("args", {})
+
+    # Rule 1: Deny tools that are not authorized for this assistant.
+    if name not in role_tools:
+        return "deny", f"{name} is not allowed for this assistant"
+
+    # Rule 2: Check for arguments originating from untrusted content.
+    # Only external-risk tools require confirmation for tainted arguments.
+    if TOOL_RISK.get(name) == "external":
+
+        # Collect the text of all untrusted retrieved chunks.
+        untrusted_text = [
+            chunk.get("text", "").lower()
+            for chunk in chunks
+            if not chunk.get("trusted", False)
+        ]
+
+        tainted_names = []
+
+        # Check each argument for a non-empty string appearing
+        # in the text of any untrusted chunk (case-insensitive).
+        for arg_name, arg_value in args.items():
+
+            if (
+                isinstance(arg_value, str)
+                and arg_value.strip()
+                and any(
+                    arg_value.lower() in text
+                    for text in untrusted_text
+                )
+            ):
+                tainted_names.append(arg_name)
+
+        # Require confirmation if any arguments are tainted.
+        if tainted_names:
+            tainted_names.sort()
+
+            names = ", ".join(tainted_names)
+
+            return (
+                "confirm",
+                f"{name} arguments come from untrusted content: {names}"
+            )
+
+    # Rule 3: Allow authorized calls without tainted arguments.
+    return "allow", "ok"
 
 # Step 9 - run_turn (not yet solved)
 # TODO: implement
