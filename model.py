@@ -492,8 +492,81 @@ def build_prompt(question, chunks, tools=None, budget=120):
     # Return the complete prompt with one item per line.
     return "\n".join(lines)
 
-# Step 5 - parse_answer (not yet solved)
-# TODO: implement
+# Step 5 - parse_answer
+def parse_answer(raw, known_ids):
+    """(answer dict, []) if the reply holds a valid answer, else (None, list of error messages)."""
+
+    # Step 1: Extract the JSON object from the first '{' to the last '}'.
+    start = raw.find("{")
+    end = raw.rfind("}")
+
+    # Return an error if no complete JSON object is present.
+    if start == -1 or end == -1 or start > end:
+        return None, ["no JSON object found"]
+
+    json_text = raw[start:end + 1]
+
+    # Step 2: Parse the extracted JSON.
+    try:
+        obj = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError):
+        return None, ["invalid JSON"]
+
+    # The parsed result must be a dictionary.
+    if not isinstance(obj, dict):
+        return None, ["no JSON object found"]
+
+    # Collect all validation errors in the required order.
+    errors = []
+
+    # Step 3: Validate the answer field.
+    if not isinstance(obj.get("answer"), str):
+        errors.append("answer must be a string")
+
+    # Step 4: Validate citations.
+    citations = obj.get("citations")
+
+    if (
+        not isinstance(citations, list)
+        or any(
+            not any(cid == known_id for known_id in known_ids)
+            for cid in citations
+        )
+    ):
+        errors.append(
+            "citations must be a list of chunk ids from the context"
+        )
+
+    # Step 5: Validate confidence.
+    confidence = obj.get("confidence")
+
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0 <= confidence <= 1
+    ):
+        errors.append(
+            "confidence must be a number from 0 to 1"
+        )
+
+    # Step 6: Validate the optional tool_call field.
+    if "tool_call" in obj:
+        tool_call = obj["tool_call"]
+
+        if (
+            not isinstance(tool_call, dict)
+            or not isinstance(tool_call.get("name"), str)
+            or not isinstance(tool_call.get("args"), dict)
+        ):
+            errors.append(
+                "tool_call must have a name and an args object"
+            )
+
+    # Return the parsed object only when every validation succeeds.
+    if errors:
+        return None, errors
+
+    return obj, []
 
 # Step 6 - ask (not yet solved)
 # TODO: implement
